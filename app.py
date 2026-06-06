@@ -81,7 +81,7 @@ st.markdown("Faça o upload das bases de dados para extrair a inteligência geoe
 
 with st.sidebar:
     st.header("1. Upload de Arquivos")
-    kml_file = st.file_uploader("Arquivo KML (Ex: ESTADO RJ.kml)", type=['kml'])
+    kml_file = st.file_uploader("Arquivo KML (Ex: ESTADO RJ.kml)", type=['kml', 'xml'])
     sisgeo_file = st.file_uploader("Ocorrências SISGEO (CSV)", type=['csv'])
     firms_file = st.file_uploader("Focos FIRMS NASA (CSV)", type=['csv'])
     inpe_file = st.file_uploader("Focos INPE (CSV)", type=['csv'])
@@ -96,7 +96,7 @@ if gerar:
     if not all([kml_file, sisgeo_file, firms_file, inpe_file]):
         st.warning("⚠️ Por favor, faça o upload de todos os 4 arquivos (KML, SISGEO, FIRMS e INPE) para prosseguir.")
     else:
-        with st.spinner("Extraindo inteligência geoespacial e cruzando coordenadas (Calculando ICE)..."):
+        with st.spinner("A extrair inteligência geoespacial e a cruzar coordenadas (Calculando ICE)..."):
             
             # 1. KML Parsing
             rj_geom, polygons = processar_kml(kml_file)
@@ -105,32 +105,44 @@ if gerar:
             
             # 2. SISGEO Parsing
             sisgeo_df = pd.read_csv(sisgeo_file, sep=None, engine='python')
+            
+            # Limpar espaços invisíveis dos nomes das colunas
+            sisgeo_df.columns = sisgeo_df.columns.str.strip()
+            
             # Tratamento de coordenadas
-            sisgeo_df['Latitude'] = sisgeo_df['Latitude/Longitude'].apply(lambda v: float(str(v).split(',')[0]) if ',' in str(v) else np.nan)
-            sisgeo_df['Longitude'] = sisgeo_df['Latitude/Longitude'].apply(lambda v: float(str(v).split(',')[1]) if ',' in str(v) else np.nan)
+            if 'Latitude/Longitude' in sisgeo_df.columns:
+                sisgeo_df['Latitude'] = sisgeo_df['Latitude/Longitude'].apply(lambda v: float(str(v).split(',')[0]) if ',' in str(v) else np.nan)
+                sisgeo_df['Longitude'] = sisgeo_df['Latitude/Longitude'].apply(lambda v: float(str(v).split(',')[1]) if ',' in str(v) else np.nan)
             sisgeo_df = sisgeo_df.dropna(subset=['Latitude', 'Longitude'])
-            sisgeo_df['Data Ocorrência'] = pd.to_datetime(sisgeo_df['Data Ocorrência'], dayfirst=True, errors='coerce')
-            sisgeo_filtrado = sisgeo_df[(sisgeo_df['Data Ocorrência'] >= start_dt) & (sisgeo_df['Data Ocorrência'].dt.floor('d') <= end_dt)].copy()
+            
+            # Tratamento de Data
+            col_data = 'Data Ocorrência' if 'Data Ocorrência' in sisgeo_df.columns else sisgeo_df.columns[0]
+            sisgeo_df[col_data] = pd.to_datetime(sisgeo_df[col_data], dayfirst=True, errors='coerce')
+            sisgeo_filtrado = sisgeo_df[(sisgeo_df[col_data] >= start_dt) & (sisgeo_df[col_data].dt.floor('d') <= end_dt)].copy()
+            
+            # Filtro Espacial KML
             sisgeo_filtrado['is_in_rj'] = sisgeo_filtrado.apply(lambda row: Point(row['Longitude'], row['Latitude']).within(rj_geom), axis=1)
             sisgeo_filtrado = sisgeo_filtrado[sisgeo_filtrado['is_in_rj']].copy()
             
             # 3. INPE Parsing
             inpe_df = pd.read_csv(inpe_file, sep=None, engine='python')
-            inpe_df['DataHora'] = pd.to_datetime(inpe_df['DataHora'], errors='coerce')
-            inpe_filtrado = inpe_df[(inpe_df['DataHora'] >= start_dt) & (inpe_df['DataHora'].dt.floor('d') <= end_dt)].copy()
-            inpe_filtrado['is_in_rj'] = inpe_filtrado.apply(lambda row: Point(row['Longitude'], row['Latitude']).within(rj_geom), axis=1)
+            inpe_df.columns = inpe_df.columns.str.strip()
+            col_data_inpe = 'DataHora' if 'DataHora' in inpe_df.columns else inpe_df.columns[0]
+            inpe_df[col_data_inpe] = pd.to_datetime(inpe_df[col_data_inpe], errors='coerce')
+            inpe_filtrado = inpe_df[(inpe_df[col_data_inpe] >= start_dt) & (inpe_df[col_data_inpe].dt.floor('d') <= end_dt)].copy()
+            
+            col_lat_inpe = 'Latitude' if 'Latitude' in inpe_filtrado.columns else 'Lat'
+            col_lon_inpe = 'Longitude' if 'Longitude' in inpe_filtrado.columns else 'Lon'
+            inpe_filtrado['is_in_rj'] = inpe_filtrado.apply(lambda row: Point(row[col_lon_inpe], row[col_lat_inpe]).within(rj_geom), axis=1)
             inpe_filtrado = inpe_filtrado[inpe_filtrado['is_in_rj']].copy()
             
             # 4. FIRMS Parsing
             firms_df = pd.read_csv(firms_file, sep=None, engine='python')
+            firms_df.columns = firms_df.columns.str.strip()
             firms_df['acq_date'] = pd.to_datetime(firms_df['acq_date'], errors='coerce')
             firms_filtrado = firms_df[(firms_df['acq_date'] >= start_dt) & (firms_df['acq_date'] <= end_dt)].copy()
             firms_filtrado['is_in_rj'] = firms_filtrado.apply(lambda row: Point(row['longitude'], row['latitude']).within(rj_geom), axis=1)
             firms_filtrado = firms_filtrado[firms_filtrado['is_in_rj']].copy()
-            
-            # Para fins de simplificação no app, assumimos Municipio padrão FIRMS como 'Indefinido' se não houver shape municipal
-            if 'Municipio' not in firms_filtrado.columns:
-                firms_filtrado['Municipio'] = "Mapeado via Satélite"
 
             # 5. Cruzamento ICE (Índice de Correlação Espacial)
             matched_occ_indices = set()
@@ -154,7 +166,7 @@ if gerar:
             matched_inpe = []
             ice_f_inpe, ice_m_inpe, ice_s_inpe = 0, 0, 0
             for idx, i_row in inpe_filtrado.iterrows():
-                ds = haversine(i_row['Latitude'], i_row['Longitude'], sisgeo_filtrado['Latitude'].values, sisgeo_filtrado['Longitude'].values)
+                ds = haversine(i_row[col_lat_inpe], i_row[col_lon_inpe], sisgeo_filtrado['Latitude'].values, sisgeo_filtrado['Longitude'].values)
                 if len(ds) > 0:
                     min_dist = np.min(ds)
                     if min_dist <= 1.0:
@@ -167,18 +179,36 @@ if gerar:
             
             matched_sisgeo_df = sisgeo_filtrado.loc[list(matched_occ_indices)]
 
-            # 6. Gerar Mapa
-            map_img_b64 = gerar_mapa_b64(polygons, sisgeo_filtrado, firms_filtrado, inpe_filtrado, matched_sisgeo_df, matched_firms_df, matched_inpe_df)
+            # 6. Resumos de Dados Seguros
+            coluna_subtipo = None
+            for col in sisgeo_filtrado.columns:
+                if col.lower() in ['subtipo', 'tipo', 'natureza', 'descricao']:
+                    coluna_subtipo = col
+                    break
             
-            # Resumos para tabelas HTML
-            sisgeo_sub = sisgeo_filtrado['Subtipo'].value_counts().reset_index()
-            sisgeo_sub.columns = ['Subtipo', 'Ocorrências']
+            if coluna_subtipo:
+                sisgeo_sub = sisgeo_filtrado[coluna_subtipo].value_counts().reset_index()
+                sisgeo_sub.columns = ['Subtipo', 'Ocorrências']
+            else:
+                sisgeo_sub = pd.DataFrame(columns=['Subtipo', 'Ocorrências'])
+                st.warning("⚠️ Atenção: A coluna de tipologia (Subtipo/Tipo) não foi encontrada na planilha do SISGEO. A tabela correspondente ficará vazia.")
+
+            col_ocorrencia = 'Ocorrência' if 'Ocorrência' in sisgeo_filtrado.columns else sisgeo_filtrado.columns[0]
+            col_unidade = 'Unidade' if 'Unidade' in sisgeo_filtrado.columns else '-'
             
             tabela_cruzamento = ""
             for _, row in matched_sisgeo_df.iterrows():
-                tabela_cruzamento += f"<tr><td><span style='color: #2980b9; font-weight: bold;'>&#128658; {row['Ocorrência']}</span></td><td>{row.get('Município', '-')}</td><td>{row['Subtipo']}</td><td>{row['Unidade']}</td><td>{round(row['Latitude'],4)} / {round(row['Longitude'],4)}</td></tr>"
+                val_ocorrencia = row[col_ocorrencia] if col_ocorrencia in row else '-'
+                val_subtipo = row[coluna_subtipo] if coluna_subtipo else '-'
+                val_unidade = row[col_unidade] if col_unidade in row else '-'
+                val_municipio = row['Município'] if 'Município' in sisgeo_filtrado.columns else '-'
+                
+                tabela_cruzamento += f"<tr><td><span style='color: #2980b9; font-weight: bold;'>&#128658; {val_ocorrencia}</span></td><td>{val_municipio}</td><td>{val_subtipo}</td><td>{val_unidade}</td><td>{round(row['Latitude'],4)} / {round(row['Longitude'],4)}</td></tr>"
 
-            # 7. Construir HTML
+            # 7. Gerar Mapa
+            map_img_b64 = gerar_mapa_b64(polygons, sisgeo_filtrado, firms_filtrado, inpe_filtrado, matched_sisgeo_df, matched_firms_df, matched_inpe_df)
+
+            # 8. Construir HTML
             html_content = f"""
             <!DOCTYPE html>
             <html lang="pt-BR">
@@ -205,7 +235,7 @@ if gerar:
                 </div>
 
                 <div class="intro-box">
-                    <p>Este relatório apresenta um panorama integrado das ocorrências de fogo em vegetação. Diferentemente da delimitação padrão, <strong>este documento filtrou rigorosamente todos os pontos de calor (satélite) e as ocorrências (CBMERJ) usando os limites geográficos extraídos do arquivo KML.</strong></p>
+                    <p>Este relatório apresenta um panorama integrado das ocorrências de fogo em vegetação. Diferentemente da delimitação padrão, <strong>este documento filtrou rigorosamente todos os pontos de calor (satélite) e as ocorrências (CBMERJ) utilizando os limites geográficos extraídos do arquivo KML.</strong></p>
                 </div>
 
                 <h2>1. Quadro de Dados Encontrados (No Polígono)</h2>
@@ -243,7 +273,9 @@ if gerar:
 
                 <h2>6. Conclusão Institucional</h2>
                 <p style="text-align: justify; font-size: 9pt;">A análise confirmada pelos limites geográficos mapeia de maneira robusta os padrões de incêndio. A métrica ICE (Índice de Correlação Espacial) comprova que a pronta-resposta operacional do CBMERJ esteve perfeitamente alinhada com as anomalias captadas pelo espaço, neutralizando os alertas orbitais de maior relevância.</p>
-                <p style="text-align: justify; font-size: 9pt;">A análise do SISGEO indica forte desgaste originado por eventos antrópicos urbanos. Para combater a ignição irregular, sugere-se articulação da Defesa Civil com as COMPDECs e concessionárias, visando zeladoria preventiva e alinhamento logístico do PLANCON.</p>
+                <p style="text-align: justify; font-size: 9pt;">Ademais, cabe pontuar a divergência quantitativa entre os registros da plataforma FIRMS/NASA e do BDQueimadas/INPE. Essa diferença não denota inconsistência nos sistemas, mas sim metodologias de processamento orbitais distintas e complementares. A NASA opera com sensores de altíssima sensibilidade (como o VIIRS) para fornecer dados brutos em tempo quase real, enquanto o INPE aplica um rigoroso algoritmo de filtragem utilizando satélites de referência (como o Aqua) para depurar 'falsos positivos'.</p>
+                <p style="text-align: justify; font-size: 9pt;">Os dados do ICE-S evidenciam como a inteligência geográfica agrega valor estratégico à triagem de chamados. A validação espacial permite filtrar anomalias térmicas pulverizadas e queimas controladas que não configuram emergência real, evitando o empenho desnecessário da tropa e preservando a prontidão da Força Especializada.</p>
+                <p style="text-align: justify; font-size: 9pt;">A análise do SISGEO indica forte desgaste originado por eventos antrópicos urbanos. Para combater a ignição irregular, sugere-se a articulação da Defesa Civil com as COMPDECs e concessionárias, promovendo ações de zeladoria e fortalecendo o eixo preventivo do PLANCON.</p>
             </body>
             </html>
             """
@@ -259,9 +291,9 @@ if gerar:
             with tab2:
                 st.markdown("### Exportar Documento")
                 st.download_button(
-                    label="Baixar Relatório em HTML (Pode ser impresso como PDF no navegador)",
+                    label="Descarregar Relatório em HTML (Pode ser impresso como PDF no navegador)",
                     data=html_content,
-                    file_name=f"Relatorio_NIFAD_{start_date}_a_{end_date}.html",
+                    file_name=f"Relatorio_NIFAD_{start_dt.strftime('%Y%m%d')}.html",
                     mime="text/html",
                     type="primary"
                 )
