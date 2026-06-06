@@ -83,7 +83,8 @@ with st.sidebar:
     st.header("1. Upload de Arquivos")
     kml_file = st.file_uploader("Arquivo KML (Ex: ESTADO RJ.kml)", type=['kml', 'xml'])
     sisgeo_file = st.file_uploader("Ocorrências SISGEO (CSV)", type=['csv'])
-    firms_file = st.file_uploader("Focos FIRMS NASA (CSV)", type=['csv'])
+    # MULTIPLOS ARQUIVOS PARA O FIRMS
+    firms_files = st.file_uploader("Focos FIRMS NASA (Selecione os 4 CSVs)", type=['csv'], accept_multiple_files=True)
     inpe_file = st.file_uploader("Focos INPE (CSV)", type=['csv'])
     
     st.header("2. Período de Análise")
@@ -93,8 +94,9 @@ with st.sidebar:
     gerar = st.button("Cruzar Dados e Gerar Relatório", type="primary", use_container_width=True)
 
 if gerar:
-    if not all([kml_file, sisgeo_file, firms_file, inpe_file]):
-        st.warning("⚠️ Por favor, faça o upload de todos os 4 arquivos (KML, SISGEO, FIRMS e INPE) para prosseguir.")
+    # Verificação atualizada para incluir a lista de arquivos do FIRMS
+    if not all([kml_file, sisgeo_file, inpe_file]) or not firms_files:
+        st.warning("⚠️ Por favor, faça o upload de todos os arquivos (KML, SISGEO, os 4 do FIRMS e INPE) para prosseguir.")
     else:
         with st.spinner("A extrair inteligência geoespacial e a cruzar coordenadas (Calculando ICE)..."):
             
@@ -105,40 +107,46 @@ if gerar:
             
             # 2. SISGEO Parsing
             sisgeo_df = pd.read_csv(sisgeo_file, sep=None, engine='python')
-            
-            # Limpar espaços invisíveis dos nomes das colunas
             sisgeo_df.columns = sisgeo_df.columns.str.strip()
             
-            # Tratamento de coordenadas
             if 'Latitude/Longitude' in sisgeo_df.columns:
                 sisgeo_df['Latitude'] = sisgeo_df['Latitude/Longitude'].apply(lambda v: float(str(v).split(',')[0]) if ',' in str(v) else np.nan)
                 sisgeo_df['Longitude'] = sisgeo_df['Latitude/Longitude'].apply(lambda v: float(str(v).split(',')[1]) if ',' in str(v) else np.nan)
+            
             sisgeo_df = sisgeo_df.dropna(subset=['Latitude', 'Longitude'])
             
-            # Tratamento de Data
-            col_data = 'Data Ocorrência' if 'Data Ocorrência' in sisgeo_df.columns else sisgeo_df.columns[0]
-            sisgeo_df[col_data] = pd.to_datetime(sisgeo_df[col_data], dayfirst=True, errors='coerce')
-            sisgeo_filtrado = sisgeo_df[(sisgeo_df[col_data] >= start_dt) & (sisgeo_df[col_data].dt.floor('d') <= end_dt)].copy()
-            
-            # Filtro Espacial KML
-            sisgeo_filtrado['is_in_rj'] = sisgeo_filtrado.apply(lambda row: Point(row['Longitude'], row['Latitude']).within(rj_geom), axis=1)
-            sisgeo_filtrado = sisgeo_filtrado[sisgeo_filtrado['is_in_rj']].copy()
+            if len(sisgeo_df) > 0:
+                col_data = 'Data Ocorrência' if 'Data Ocorrência' in sisgeo_df.columns else sisgeo_df.columns[0]
+                sisgeo_df[col_data] = pd.to_datetime(sisgeo_df[col_data], dayfirst=True, errors='coerce')
+                sisgeo_filtrado = sisgeo_df[(sisgeo_df[col_data] >= start_dt) & (sisgeo_df[col_data].dt.floor('d') <= end_dt)].copy()
+                sisgeo_filtrado['is_in_rj'] = sisgeo_filtrado.apply(lambda row: Point(row['Longitude'], row['Latitude']).within(rj_geom), axis=1)
+                sisgeo_filtrado = sisgeo_filtrado[sisgeo_filtrado['is_in_rj']].copy()
+            else:
+                sisgeo_filtrado = pd.DataFrame()
             
             # 3. INPE Parsing
             inpe_df = pd.read_csv(inpe_file, sep=None, engine='python')
             inpe_df.columns = inpe_df.columns.str.strip()
-            col_data_inpe = 'DataHora' if 'DataHora' in inpe_df.columns else inpe_df.columns[0]
-            inpe_df[col_data_inpe] = pd.to_datetime(inpe_df[col_data_inpe], errors='coerce')
-            inpe_filtrado = inpe_df[(inpe_df[col_data_inpe] >= start_dt) & (inpe_df[col_data_inpe].dt.floor('d') <= end_dt)].copy()
+            if len(inpe_df.columns) > 0:
+                col_data_inpe = 'DataHora' if 'DataHora' in inpe_df.columns else inpe_df.columns[0]
+                inpe_df[col_data_inpe] = pd.to_datetime(inpe_df[col_data_inpe], errors='coerce')
+                inpe_filtrado = inpe_df[(inpe_df[col_data_inpe] >= start_dt) & (inpe_df[col_data_inpe].dt.floor('d') <= end_dt)].copy()
+                
+                col_lat_inpe = 'Latitude' if 'Latitude' in inpe_filtrado.columns else 'Lat'
+                col_lon_inpe = 'Longitude' if 'Longitude' in inpe_filtrado.columns else 'Lon'
+                inpe_filtrado['is_in_rj'] = inpe_filtrado.apply(lambda row: Point(row[col_lon_inpe], row[col_lat_inpe]).within(rj_geom), axis=1)
+                inpe_filtrado = inpe_filtrado[inpe_filtrado['is_in_rj']].copy()
+            else:
+                inpe_filtrado = pd.DataFrame()
             
-            col_lat_inpe = 'Latitude' if 'Latitude' in inpe_filtrado.columns else 'Lat'
-            col_lon_inpe = 'Longitude' if 'Longitude' in inpe_filtrado.columns else 'Lon'
-            inpe_filtrado['is_in_rj'] = inpe_filtrado.apply(lambda row: Point(row[col_lon_inpe], row[col_lat_inpe]).within(rj_geom), axis=1)
-            inpe_filtrado = inpe_filtrado[inpe_filtrado['is_in_rj']].copy()
+            # 4. FIRMS Parsing (UNINDO OS 4 ARQUIVOS)
+            dfs_firms = []
+            for f in firms_files:
+                temp_df = pd.read_csv(f, sep=None, engine='python')
+                temp_df.columns = temp_df.columns.str.strip()
+                dfs_firms.append(temp_df)
             
-            # 4. FIRMS Parsing
-            firms_df = pd.read_csv(firms_file, sep=None, engine='python')
-            firms_df.columns = firms_df.columns.str.strip()
+            firms_df = pd.concat(dfs_firms, ignore_index=True)
             firms_df['acq_date'] = pd.to_datetime(firms_df['acq_date'], errors='coerce')
             firms_filtrado = firms_df[(firms_df['acq_date'] >= start_dt) & (firms_df['acq_date'] <= end_dt)].copy()
             firms_filtrado['is_in_rj'] = firms_filtrado.apply(lambda row: Point(row['longitude'], row['latitude']).within(rj_geom), axis=1)
@@ -150,60 +158,72 @@ if gerar:
             # ICE FIRMS
             matched_firms = []
             ice_f_firms, ice_m_firms, ice_s_firms = 0, 0, 0
-            for idx, f_row in firms_filtrado.iterrows():
-                ds = haversine(f_row['latitude'], f_row['longitude'], sisgeo_filtrado['Latitude'].values, sisgeo_filtrado['Longitude'].values)
-                if len(ds) > 0:
-                    min_dist = np.min(ds)
-                    if min_dist <= 1.0:
-                        matched_firms.append(f_row)
-                        matched_occ_indices.add(sisgeo_filtrado.iloc[np.argmin(ds)].name)
-                        ice_f_firms += 1
-                    elif 1.0 < min_dist <= 3.0: ice_m_firms += 1
-                    elif 3.0 < min_dist <= 5.0: ice_s_firms += 1
+            if len(sisgeo_filtrado) > 0 and len(firms_filtrado) > 0:
+                for idx, f_row in firms_filtrado.iterrows():
+                    ds = haversine(f_row['latitude'], f_row['longitude'], sisgeo_filtrado['Latitude'].values, sisgeo_filtrado['Longitude'].values)
+                    if len(ds) > 0:
+                        min_dist = np.min(ds)
+                        if min_dist <= 1.0:
+                            matched_firms.append(f_row)
+                            matched_occ_indices.add(sisgeo_filtrado.iloc[np.argmin(ds)].name)
+                            ice_f_firms += 1
+                        elif 1.0 < min_dist <= 3.0: ice_m_firms += 1
+                        elif 3.0 < min_dist <= 5.0: ice_s_firms += 1
             matched_firms_df = pd.DataFrame(matched_firms)
 
             # ICE INPE
             matched_inpe = []
             ice_f_inpe, ice_m_inpe, ice_s_inpe = 0, 0, 0
-            for idx, i_row in inpe_filtrado.iterrows():
-                ds = haversine(i_row[col_lat_inpe], i_row[col_lon_inpe], sisgeo_filtrado['Latitude'].values, sisgeo_filtrado['Longitude'].values)
-                if len(ds) > 0:
-                    min_dist = np.min(ds)
-                    if min_dist <= 1.0:
-                        matched_inpe.append(i_row)
-                        matched_occ_indices.add(sisgeo_filtrado.iloc[np.argmin(ds)].name)
-                        ice_f_inpe += 1
-                    elif 1.0 < min_dist <= 3.0: ice_m_inpe += 1
-                    elif 3.0 < min_dist <= 5.0: ice_s_inpe += 1
+            if len(sisgeo_filtrado) > 0 and len(inpe_filtrado) > 0:
+                for idx, i_row in inpe_filtrado.iterrows():
+                    ds = haversine(i_row[col_lat_inpe], i_row[col_lon_inpe], sisgeo_filtrado['Latitude'].values, sisgeo_filtrado['Longitude'].values)
+                    if len(ds) > 0:
+                        min_dist = np.min(ds)
+                        if min_dist <= 1.0:
+                            matched_inpe.append(i_row)
+                            matched_occ_indices.add(sisgeo_filtrado.iloc[np.argmin(ds)].name)
+                            ice_f_inpe += 1
+                        elif 1.0 < min_dist <= 3.0: ice_m_inpe += 1
+                        elif 3.0 < min_dist <= 5.0: ice_s_inpe += 1
             matched_inpe_df = pd.DataFrame(matched_inpe)
             
-            matched_sisgeo_df = sisgeo_filtrado.loc[list(matched_occ_indices)]
+            if len(matched_occ_indices) > 0:
+                matched_sisgeo_df = sisgeo_filtrado.loc[list(matched_occ_indices)]
+            else:
+                matched_sisgeo_df = pd.DataFrame()
 
-            # 6. Resumos de Dados Seguros
+            # 6. Resumos de Dados Seguros (Evitando KeyError / IndexError)
             coluna_subtipo = None
-            for col in sisgeo_filtrado.columns:
-                if col.lower() in ['subtipo', 'tipo', 'natureza', 'descricao']:
-                    coluna_subtipo = col
-                    break
+            if len(sisgeo_filtrado.columns) > 0:
+                for col in sisgeo_filtrado.columns:
+                    if col.lower() in ['subtipo', 'tipo', 'natureza', 'descricao']:
+                        coluna_subtipo = col
+                        break
             
             if coluna_subtipo:
                 sisgeo_sub = sisgeo_filtrado[coluna_subtipo].value_counts().reset_index()
                 sisgeo_sub.columns = ['Subtipo', 'Ocorrências']
             else:
                 sisgeo_sub = pd.DataFrame(columns=['Subtipo', 'Ocorrências'])
-                st.warning("⚠️ Atenção: A coluna de tipologia (Subtipo/Tipo) não foi encontrada na planilha do SISGEO. A tabela correspondente ficará vazia.")
+                st.warning("⚠️ Atenção: A coluna de tipologia (Subtipo/Tipo) não foi encontrada.")
 
-            col_ocorrencia = 'Ocorrência' if 'Ocorrência' in sisgeo_filtrado.columns else sisgeo_filtrado.columns[0]
+            # Proteção contra IndexError
+            if len(sisgeo_filtrado.columns) > 0:
+                col_ocorrencia = 'Ocorrência' if 'Ocorrência' in sisgeo_filtrado.columns else sisgeo_filtrado.columns[0]
+            else:
+                col_ocorrencia = 'Ocorrência'
+                
             col_unidade = 'Unidade' if 'Unidade' in sisgeo_filtrado.columns else '-'
             
             tabela_cruzamento = ""
-            for _, row in matched_sisgeo_df.iterrows():
-                val_ocorrencia = row[col_ocorrencia] if col_ocorrencia in row else '-'
-                val_subtipo = row[coluna_subtipo] if coluna_subtipo else '-'
-                val_unidade = row[col_unidade] if col_unidade in row else '-'
-                val_municipio = row['Município'] if 'Município' in sisgeo_filtrado.columns else '-'
-                
-                tabela_cruzamento += f"<tr><td><span style='color: #2980b9; font-weight: bold;'>&#128658; {val_ocorrencia}</span></td><td>{val_municipio}</td><td>{val_subtipo}</td><td>{val_unidade}</td><td>{round(row['Latitude'],4)} / {round(row['Longitude'],4)}</td></tr>"
+            if len(matched_sisgeo_df) > 0:
+                for _, row in matched_sisgeo_df.iterrows():
+                    val_ocorrencia = row[col_ocorrencia] if col_ocorrencia in row else '-'
+                    val_subtipo = row[coluna_subtipo] if coluna_subtipo else '-'
+                    val_unidade = row[col_unidade] if col_unidade in row else '-'
+                    val_municipio = row['Município'] if 'Município' in sisgeo_filtrado.columns else '-'
+                    
+                    tabela_cruzamento += f"<tr><td><span style='color: #2980b9; font-weight: bold;'>&#128658; {val_ocorrencia}</span></td><td>{val_municipio}</td><td>{val_subtipo}</td><td>{val_unidade}</td><td>{round(row['Latitude'],4)} / {round(row['Longitude'],4)}</td></tr>"
 
             # 7. Gerar Mapa
             map_img_b64 = gerar_mapa_b64(polygons, sisgeo_filtrado, firms_filtrado, inpe_filtrado, matched_sisgeo_df, matched_firms_df, matched_inpe_df)
