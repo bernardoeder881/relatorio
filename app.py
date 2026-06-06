@@ -196,7 +196,8 @@ if gerar:
             coluna_subtipo = None
             if len(sisgeo_filtrado.columns) > 0:
                 for col in sisgeo_filtrado.columns:
-                    if col.lower() in ['subtipo', 'tipo', 'natureza', 'descricao']:
+                    # Adicionamos 'específico', 'especifico' e 'espécie' para garantir!
+                    if col.lower() in ['subtipo', 'tipo', 'natureza', 'descricao', 'específico', 'especifico', 'espécie']:
                         coluna_subtipo = col
                         break
             
